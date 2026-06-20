@@ -520,7 +520,10 @@ def main():
                 res = check_normality(df[col])
                 normality_results.append({"Variable": col, **res})
             norm_df = pd.DataFrame(normality_results)
-            st.dataframe(norm_df[['Variable', 'test', 'p_value', 'interpretation']], use_container_width=True)
+            if not norm_df.empty and all(col in norm_df.columns for col in ['Variable', 'test', 'p_value', 'interpretation']):
+                st.dataframe(norm_df[['Variable', 'test', 'p_value', 'interpretation']], use_container_width=True)
+            else:
+                st.info("No normality test results to display.")
 
             all_normal = all(norm_df['is_normal']) if len(norm_df) > 0 else True
             assumption_results['is_normal'] = all_normal
@@ -558,7 +561,10 @@ def main():
                 X_vif = df[predictor_numeric].dropna()
                 if not X_vif.empty:
                     vif_res = check_multicollinearity(X_vif)
-                    st.dataframe(vif_res['vif_table'], use_container_width=True)
+                    if vif_res['vif_table'] is not None and not vif_res['vif_table'].empty:
+                        st.dataframe(vif_res['vif_table'], use_container_width=True)
+                    else:
+                        st.info("No VIF results to display.")
                     assumption_results['high_vif'] = vif_res['high_vif_features']
                     if vif_res['high_vif_features']:
                         st.warning(f"⚠️ High multicollinearity in: {', '.join(vif_res['high_vif_features'])}")
@@ -672,12 +678,19 @@ def main():
                 st.session_state['task_type'] = task_type
 
                 st.markdown("### Model Performance Comparison")
-                st.dataframe(results_df, use_container_width=True)
-
-                if is_classification:
-                    best_idx = results_df['Accuracy'].idxmax()
+                if not results_df.empty:
+                    st.dataframe(results_df, use_container_width=True)
                 else:
-                    best_idx = results_df['RMSE'].idxmin()
+                    st.warning("No model results to display. All models failed to train.")
+
+                if not results_df.empty:
+                    if is_classification and 'Accuracy' in results_df.columns:
+                        best_idx = results_df['Accuracy'].idxmax()
+                    elif 'RMSE' in results_df.columns:
+                        best_idx = results_df['RMSE'].idxmin()
+                    else:
+                        st.error("Could not determine best model - missing evaluation metrics.")
+                        return
 
                 best_model_name = results_df.loc[best_idx, 'Model']
                 st.session_state['best_model'] = trained_models[best_model_name]
@@ -782,7 +795,10 @@ def main():
         else:
             metrics_to_plot = ['Accuracy', 'F1']
 
-        available_metrics = [m for m in metrics_to_plot if m in results_df.columns]
+        if results_df is not None and not results_df.empty:
+            available_metrics = [m for m in metrics_to_plot if m in results_df.columns]
+        else:
+            available_metrics = []
         if available_metrics:
             fig = make_subplots(rows=1, cols=len(available_metrics), subplot_titles=available_metrics)
             for i, metric in enumerate(available_metrics):
