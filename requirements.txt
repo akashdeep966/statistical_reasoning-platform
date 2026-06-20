@@ -6,3 +6,6 @@ statsmodels
 scikit-learn
 plotly
 openpyxl
+xgboost
+shap
+matplotlib
