@@ -3,30 +3,48 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import scipy.stats as stats
-import statsmodels.api as sm
-from statsmodels.stats.outliers_influence import variance_inflation_factor
-from statsmodels.stats.diagnostic import het_breuschpagan
-from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold, KFold
-from sklearn.preprocessing import StandardScaler, LabelEncoder, RobustScaler
-from sklearn.impute import SimpleImputer
-from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier, GradientBoostingRegressor, GradientBoostingClassifier
-from sklearn.linear_model import LinearRegression, Ridge, Lasso, ElasticNet, LogisticRegression
-from sklearn.neighbors import KNeighborsRegressor, KNeighborsClassifier
-from sklearn.metrics import (mean_squared_error, mean_absolute_error, r2_score, 
-                             accuracy_score, precision_score, recall_score, f1_score, 
-                             mean_absolute_percentage_error)
-import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import base64
-from io import BytesIO
 import json
 import pickle
 import zipfile
+import base64
+from io import BytesIO
 import warnings
 warnings.filterwarnings('ignore')
 
-# Try optional imports
+# Try all imports with graceful fallbacks
+try:
+    import statsmodels.api as sm
+    from statsmodels.stats.outliers_influence import variance_inflation_factor
+    from statsmodels.stats.diagnostic import het_breuschpagan
+    STATSMODELS_AVAILABLE = True
+except ImportError as e:
+    STATSMODELS_AVAILABLE = False
+    st_error_statsmodels = str(e)
+
+try:
+    from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold, KFold
+    from sklearn.preprocessing import StandardScaler, LabelEncoder, RobustScaler
+    from sklearn.impute import SimpleImputer
+    from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier, GradientBoostingRegressor, GradientBoostingClassifier
+    from sklearn.linear_model import LinearRegression, Ridge, Lasso, ElasticNet, LogisticRegression
+    from sklearn.neighbors import KNeighborsRegressor, KNeighborsClassifier
+    from sklearn.decomposition import PCA
+    from sklearn.metrics import (mean_squared_error, mean_absolute_error, r2_score, 
+                                 accuracy_score, precision_score, recall_score, f1_score, 
+                                 mean_absolute_percentage_error)
+    SKLEARN_AVAILABLE = True
+except ImportError as e:
+    SKLEARN_AVAILABLE = False
+    st_error_sklearn = str(e)
+
+try:
+    import plotly.express as px
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    PLOTLY_AVAILABLE = True
+except ImportError:
+    PLOTLY_AVAILABLE = False
+
 try:
     import xgboost as xgb
     XGBOOST_AVAILABLE = True
@@ -137,11 +155,10 @@ def check_multicollinearity(X):
     vif_data["feature"] = X.columns
     try:
         vif_data["VIF"] = [variance_inflation_factor(X.values, i) for i in range(X.shape[1])]
-    except:
+    except Exception:
         vif_data["VIF"] = [np.nan] * len(X.columns)
     high_vif = vif_data[vif_data['VIF'] > 10]
-    interpretation = f"Multicollinearity check: {len(high_vif)} features with VIF > 10."
-    return {"vif_table": vif_data, "high_vif_features": high_vif['feature'].tolist(), "interpretation": interpretation}
+    return {"vif_table": vif_data, "high_vif_features": high_vif['feature'].tolist(), "interpretation": f"{len(high_vif)} features with VIF > 10."}
 
 def evaluate_model_practical_significance(y_true, y_pred, task_type):
     results = {}
@@ -169,9 +186,9 @@ def evaluate_model_practical_significance(y_true, y_pred, task_type):
         if r2 > 0.7:
             results['variance_message'] = f"R² = {r2:.3f}: Model explains {r2*100:.1f}% of variance. Strong predictive power."
         elif r2 > 0.4:
-            results['variance_message'] = f"R² = {r2:.3f}: Model explains {r2*100:.1f}% of variance. Moderate predictive power. Other factors likely influence the outcome."
+            results['variance_message'] = f"R² = {r2:.3f}: Model explains {r2*100:.1f}% of variance. Moderate predictive power."
         else:
-            results['variance_message'] = f"R² = {r2:.3f}: Model explains only {r2*100:.1f}% of variance. Weak predictive power. Consider additional features or non-linear transformations."
+            results['variance_message'] = f"R² = {r2:.3f}: Model explains only {r2*100:.1f}% of variance. Weak predictive power."
     else:
         acc = accuracy_score(y_true, y_pred)
         f1 = f1_score(y_true, y_pred, average='weighted')
@@ -183,13 +200,13 @@ def evaluate_model_practical_significance(y_true, y_pred, task_type):
         results['Lift_over_Baseline'] = lift
         if lift > 50:
             results['practical_rating'] = "Excellent"
-            results['practical_message'] = f"Model achieves {acc:.1%} accuracy, {lift:.1f}% better than always predicting the majority class. Strong business value."
+            results['practical_message'] = f"Model achieves {acc:.1%} accuracy, {lift:.1f}% better than always predicting the majority class."
         elif lift > 20:
             results['practical_rating'] = "Good"
-            results['practical_message'] = f"Model achieves {acc:.1f}% accuracy, {lift:.1f}% better than baseline. Provides meaningful improvement."
+            results['practical_message'] = f"Model achieves {acc:.1f}% accuracy, {lift:.1f}% better than baseline."
         elif lift > 0:
             results['practical_rating'] = "Marginal"
-            results['practical_message'] = f"Model achieves {acc:.1f}% accuracy, only {lift:.1f}% better than baseline. Limited practical value."
+            results['practical_message'] = f"Model achieves {acc:.1f}% accuracy, only {lift:.1f}% better than baseline."
         else:
             results['practical_rating'] = "Poor"
             results['practical_message'] = f"Model performs worse than simply predicting the majority class. Do not deploy."
@@ -209,14 +226,14 @@ def select_models(task_type, assumptions):
         else:
             reasoning.append("⚠️ Data is non-normal. Linear models may be biased. Tree-based models recommended.")
         models['Random Forest'] = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
-        reasoning.append("Random Forest: Robust to non-normality and outliers. Good for capturing non-linear relationships.")
+        reasoning.append("Random Forest: Robust to non-normality and outliers.")
         models['Gradient Boosting'] = GradientBoostingRegressor(n_estimators=100, random_state=42)
         reasoning.append("Gradient Boosting: Sequential ensemble, often higher accuracy than Random Forest.")
         if XGBOOST_AVAILABLE:
             models['XGBoost'] = xgb.XGBRegressor(n_estimators=100, random_state=42, n_jobs=-1)
             reasoning.append("XGBoost: State-of-the-art gradient boosting with regularization.")
         models['KNN'] = KNeighborsRegressor(n_neighbors=5)
-        reasoning.append("KNN: Non-parametric, useful for local patterns. Sensitive to feature scaling.")
+        reasoning.append("KNN: Non-parametric, useful for local patterns.")
     else:
         models['Logistic Regression'] = LogisticRegression(max_iter=1000, random_state=42)
         reasoning.append("Logistic Regression: Baseline probabilistic classifier with interpretable coefficients.")
@@ -228,7 +245,7 @@ def select_models(task_type, assumptions):
             models['XGBoost'] = xgb.XGBClassifier(n_estimators=100, random_state=42, n_jobs=-1, eval_metric='logloss')
             reasoning.append("XGBoost: Optimized gradient boosting with built-in regularization.")
         models['KNN'] = KNeighborsClassifier(n_neighbors=5)
-        reasoning.append("KNN: Instance-based classifier. Good for small datasets with clear decision boundaries.")
+        reasoning.append("KNN: Instance-based classifier. Good for small datasets.")
     return models, reasoning
 
 def get_download_link(object_to_download, download_filename, link_text):
@@ -263,6 +280,17 @@ def main():
     st.markdown('<div class="main-header">🧠 Statistical Reasoning & Analytics Platform</div>', unsafe_allow_html=True)
     st.markdown("*A system that thinks before it calculates. Statistical significance ≠ Practical significance.*")
 
+    # Check critical dependencies
+    if not SKLEARN_AVAILABLE:
+        st.error(f"❌ Critical: scikit-learn is not available. Error: {st_error_sklearn}")
+        st.info("Please check your requirements.txt and ensure scikit-learn is installed correctly.")
+        return
+    if not STATSMODELS_AVAILABLE:
+        st.warning(f"⚠️ statsmodels not available. Some assumption tests will be disabled. Error: {st_error_statsmodels}")
+    if not PLOTLY_AVAILABLE:
+        st.error("❌ Critical: plotly is not available. Visualizations will not work.")
+        return
+
     with st.sidebar:
         st.header("⚙️ Configuration")
         analysis_objective = st.selectbox("Analysis Objective", ["Prediction", "Explanation", "Hypothesis Testing", "Segmentation", "Dimensional Reduction"])
@@ -287,7 +315,7 @@ def main():
             elif uploaded_file.name.endswith('.xlsx'):
                 df = pd.read_excel(uploaded_file)
             else:
-                df = pd.read_csv(uploaded_file, sep='\t')
+                df = pd.read_csv(uploaded_file, sep='	')
             st.session_state['df'] = df
             st.session_state['filename'] = uploaded_file.name
             st.success(f"✅ Loaded {df.shape[0]} rows and {df.shape[1]} columns.")
@@ -305,13 +333,11 @@ def main():
         st.write(df.head())
 
     df = st.session_state['df']
-
-    # Get all column info early
     all_columns = df.columns.tolist()
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     categorical_cols = df.select_dtypes(include=['object']).columns.tolist()
 
-    # TARGET SELECTION - moved here so it's available for ALL downstream stages
+    # TARGET SELECTION - immediately after data load
     target_col = st.selectbox("Select Target Variable (if applicable)", ['None'] + all_columns)
     if target_col != 'None':
         st.session_state['target_col'] = target_col
@@ -369,9 +395,8 @@ def main():
     else:
         st.success("No missing values detected. Data is complete.")
 
-    # Outlier Analysis - using only predictor columns (excluding target)
+    # Outlier Analysis - safe because target_col is already defined
     if numeric_cols:
-        # Exclude target from outlier analysis options
         outlier_options = [c for c in numeric_cols if c != target_col] if target_col else numeric_cols
         if outlier_options:
             selected_outlier_col = st.selectbox("Select variable for Outlier Analysis", outlier_options)
@@ -445,17 +470,25 @@ def main():
 
     with eda_tab3:
         if len(numeric_cols) >= 3:
-            pca = PCA(n_components=3)
-            pca_components = pca.fit_transform(df[numeric_cols].dropna())
-            pca_df = pd.DataFrame(pca_components, columns=['PC1', 'PC2', 'PC3'])
-            fig = px.scatter_3d(pca_df, x='PC1', y='PC2', z='PC3', 
-                              title=f"3D PCA Projection (Explained Var: {sum(pca.explained_variance_ratio_):.2%})")
-            st.plotly_chart(fig, use_container_width=True)
+            try:
+                pca = PCA(n_components=3)
+                pca_components = pca.fit_transform(df[numeric_cols].dropna())
+                pca_df = pd.DataFrame(pca_components, columns=['PC1', 'PC2', 'PC3'])
+                fig = px.scatter_3d(pca_df, x='PC1', y='PC2', z='PC3', 
+                                  title=f"3D PCA Projection (Explained Var: {sum(pca.explained_variance_ratio_):.2%})")
+                st.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                st.warning(f"Could not compute PCA: {e}")
+        else:
+            st.info("Need at least 3 numeric columns for PCA visualization.")
 
     # --- STAGE 5: ASSUMPTION ENGINE ---
     st.markdown('<div class="sub-header">Stage 5: Assumption Engine</div>', unsafe_allow_html=True)
 
-    if st.button("🔬 Run Full Assumption Diagnostics", type="primary"):
+    if not STATSMODELS_AVAILABLE:
+        st.warning("statsmodels is not available. Assumption tests are disabled. Install statsmodels for full functionality.")
+
+    if STATSMODELS_AVAILABLE and st.button("🔬 Run Full Assumption Diagnostics", type="primary"):
         with st.spinner("Running comprehensive statistical tests..."):
             assumption_results = {}
 
@@ -494,7 +527,7 @@ def main():
                             if is_homoscedastic:
                                 st.success(f"✅ Breusch-Pagan: p={result['LM-Test p-value']:.4f}. Homoscedastic errors confirmed.")
                             else:
-                                st.warning(f"⚠️ Breusch-Pagan: p={result['LM-Test p-value']:.4f}. Heteroscedastic errors detected. Consider robust standard errors.")
+                                st.warning(f"⚠️ Breusch-Pagan: p={result['LM-Test p-value']:.4f}. Heteroscedastic errors detected.")
                         except Exception as e:
                             st.warning(f"Could not run Breusch-Pagan test: {e}")
 
