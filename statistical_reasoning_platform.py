@@ -256,6 +256,27 @@ def get_download_link(object_to_download, download_filename, link_text):
         b64 = base64.b64encode(object_to_download).decode()
     return f'<a href="data:file/zip;base64,{b64}" download="{download_filename}">{link_text}</a>'
 
+def convert_to_serializable(obj):
+    """Convert numpy types and other non-serializable objects to Python native types."""
+    if isinstance(obj, dict):
+        return {k: convert_to_serializable(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_to_serializable(item) for item in obj]
+    elif isinstance(obj, (np.integer, np.int64, np.int32)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, np.float64, np.float32)):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, pd.Timestamp):
+        return str(obj)
+    elif isinstance(obj, bool):
+        return bool(obj)
+    elif obj is None:
+        return None
+    else:
+        return obj
+
 def create_zip_package(model, scaler, encoders, feature_names, target_name, metrics, assumptions):
     zip_buffer = BytesIO()
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
@@ -267,8 +288,8 @@ def create_zip_package(model, scaler, encoders, feature_names, target_name, metr
         metadata = {
             'feature_names': feature_names,
             'target_name': target_name,
-            'metrics': metrics,
-            'assumptions': assumptions,
+            'metrics': convert_to_serializable(metrics),
+            'assumptions': convert_to_serializable(assumptions),
             'creation_date': str(pd.Timestamp.now()),
             'version': '2.0.0'
         }
