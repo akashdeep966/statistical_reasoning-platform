@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -11,11 +10,15 @@ from io import BytesIO
 import warnings
 warnings.filterwarnings('ignore')
 
-# Try all imports with graceful fallbacks
 try:
     import statsmodels.api as sm
     from statsmodels.stats.outliers_influence import variance_inflation_factor
     from statsmodels.stats.diagnostic import het_breuschpagan
+    from statsmodels.tsa.stattools import adfuller, kpss, acf, pacf
+    from statsmodels.tsa.seasonal import seasonal_decompose
+    from statsmodels.tsa.arima.model import ARIMA
+    from statsmodels.tsa.statespace.sarimax import SARIMAX
+    from statsmodels.tsa.holtwinters import ExponentialSmoothing
     STATSMODELS_AVAILABLE = True
 except ImportError as e:
     STATSMODELS_AVAILABLE = False
@@ -62,6 +65,12 @@ try:
     MATPLOTLIB_AVAILABLE = True
 except ImportError:
     MATPLOTLIB_AVAILABLE = False
+
+try:
+    from prophet import Prophet
+    PROPHET_AVAILABLE = True
+except ImportError:
+    PROPHET_AVAILABLE = False
 
 st.set_page_config(page_title="Statistical Reasoning & Analytics Platform", layout="wide", page_icon="🧠")
 
@@ -139,7 +148,7 @@ def get_semantic_reasoning(var1, var2, relevance):
 def check_normality(series):
     series = series.dropna()
     if len(series) < 3:
-        return {"test": "N/A", "statistic": 0, "p_value": 1.0, "is_normal": True, "interpretation": "Insufficient data for normality test."}
+        return {"test": "N/A", "statistic": 0, "p_value": 1.0, "is_normal": True, "interpretation": "Insufficient data."}
     if len(series) > 5000:
         stat, p_value = stats.kstest(series, 'norm', args=(series.mean(), series.std()))
         test_name = "Kolmogorov-Smirnov"
@@ -160,6 +169,154 @@ def check_multicollinearity(X):
     high_vif = vif_data[vif_data['VIF'] > 10]
     return {"vif_table": vif_data, "high_vif_features": high_vif['feature'].tolist(), "interpretation": f"{len(high_vif)} features with VIF > 10."}
 
+# ===================== TIME SERIES FUNCTIONS =====================
+def check_stationarity_adf(series):
+    series = series.dropna()
+    if len(series) < 10:
+        return {"test": "ADF", "statistic": 0, "p_value": 1.0, "is_stationary": True, "interpretation": "Insufficient data for ADF test."}
+    result = adfuller(series)
+    is_stationary = result[1] < 0.05
+    return {"test": "ADF", "statistic": result[0], "p_value": result[1], "is_stationary": is_stationary,
+            "interpretation": f"ADF: p={result[1]:.4f}. Series is {'Stationary' if is_stationary else 'Non-Stationary'}."}
+
+def check_stationarity_kpss(series):
+    series = series.dropna()
+    if len(series) < 10:
+        return {"test": "KPSS", "statistic": 0, "p_value": 1.0, "is_stationary": True, "interpretation": "Insufficient data for KPSS test."}
+    try:
+        result = kpss(series, regression='c')
+        is_stationary = result[1] > 0.05
+        return {"test": "KPSS", "statistic": result[0], "p_value": result[1], "is_stationary": is_stationary,
+                "interpretation": f"KPSS: p={result[1]:.4f}. Series is {'Stationary' if is_stationary else 'Non-Stationary'}."}
+    except Exception as e:
+        return {"test": "KPSS", "statistic": 0, "p_value": 1.0, "is_stationary": True, "interpretation": f"KPSS test failed: {e}"}
+
+def detect_trend(series):
+    series = series.dropna()
+    if len(series) < 10:
+        return {"has_trend": False, "slope": 0, "interpretation": "Insufficient data for trend detection."}
+    x = np.arange(len(series))
+    slope, intercept, r_value, p_value, std_err = stats.linregress(x, series)
+    has_trend = p_value < 0.05
+    direction = "upward" if slope > 0 else "downward"
+    return {"has_trend": has_trend, "slope": slope, "r_squared": r_value**2, "p_value": p_value,
+            "interpretation": f"{'Significant' if has_trend else 'No significant'} {direction} trend detected (p={p_value:.4f}, R²={r_value**2:.3f})."}
+
+def detect_seasonality(series, period=None):
+    series = series.dropna()
+    if len(series) < 20:
+        return {"has_seasonality": False, "period": period, "interpretation": "Insufficient data for seasonality detection."}
+    if period is None:
+        period = 12 if len(series) >= 24 else 4
+    try:
+        acf_vals = acf(series, nlags=min(period * 2, len(series)//2), fft=True)
+        seasonal_strength = abs(acf_vals[period]) if period < len(acf_vals) else 0
+        has_seasonality = seasonal_strength > 0.3
+        return {"has_seasonality": has_seasonality, "period": period, "seasonal_strength": seasonal_strength,
+                "interpretation": f"{'Significant' if has_seasonality else 'Weak'} seasonality at period={period} (ACF={seasonal_strength:.3f})."}
+    except Exception as e:
+        return {"has_seasonality": False, "period": period, "seasonal_strength": 0, "interpretation": f"Seasonality detection failed: {e}"}
+
+def time_series_decompose(series, period=None):
+    series = series.dropna()
+    if len(series) < 20:
+        return None
+    if period is None:
+        period = 12 if len(series) >= 24 else 4
+    try:
+        return seasonal_decompose(series, model='additive', period=period)
+    except Exception:
+        return None
+
+def select_ts_model(series, adf_result, kpss_result, seasonality_result, trend_result):
+    is_stationary = adf_result.get('is_stationary', False) and kpss_result.get('is_stationary', False)
+    has_trend = trend_result.get('has_trend', False)
+    has_seasonality = seasonality_result.get('has_seasonality', False)
+    period = seasonality_result.get('period', 12)
+    recommendations = []
+    models = {}
+
+    if is_stationary and not has_seasonality:
+        recommendations.append("✅ Stationary, no seasonality. ARIMA(p,d,q) with d=0 appropriate.")
+        models['ARIMA(1,0,1)'] = {'order': (1, 0, 1), 'seasonal': None}
+    elif not is_stationary and not has_seasonality:
+        recommendations.append("⚠️ Non-stationary, no seasonality. ARIMA with differencing (d≥1) needed.")
+        models['ARIMA(1,1,1)'] = {'order': (1, 1, 1), 'seasonal': None}
+    elif is_stationary and has_seasonality:
+        recommendations.append("✅ Stationary with seasonality. SARIMA with seasonal component appropriate.")
+        models['SARIMA(1,0,1)(1,0,1,' + str(period) + ')'] = {'order': (1, 0, 1), 'seasonal': (1, 0, 1, period)}
+    else:
+        recommendations.append("⚠️ Non-stationary with seasonality. SARIMA with differencing needed.")
+        models['SARIMA(1,1,1)(1,1,1,' + str(period) + ')'] = {'order': (1, 1, 1), 'seasonal': (1, 1, 1, period)}
+
+    if has_trend and not has_seasonality:
+        recommendations.append("Trend detected without seasonality. Holt-Winters (trend only) or ETS suitable.")
+        models['Holt-Winters'] = {'type': 'hw'}
+
+    if PROPHET_AVAILABLE:
+        recommendations.append("Prophet: Good for data with strong seasonality and holiday effects.")
+        models['Prophet'] = {'type': 'prophet'}
+
+    recommendations.append("Naive/Baseline: Always compare against simple baselines.")
+    models['Naive'] = {'type': 'naive'}
+    models['Seasonal Naive'] = {'type': 'seasonal_naive', 'period': period}
+    return models, recommendations
+
+def fit_ts_model(series, model_name, model_config, train_size=0.8):
+    series = series.dropna()
+    train_idx = int(len(series) * train_size)
+    train = series.iloc[:train_idx]
+    test = series.iloc[train_idx:]
+    if len(train) < 10 or len(test) < 2:
+        return None, None, {"error": "Insufficient data for train/test split."}
+    try:
+        if model_config.get('type') == 'naive':
+            predictions = pd.Series([train.iloc[-1]] * len(test), index=test.index)
+        elif model_config.get('type') == 'seasonal_naive':
+            period = model_config.get('period', 12)
+            predictions = pd.Series(index=test.index)
+            for i in range(len(test)):
+                if i < period:
+                    predictions.iloc[i] = train.iloc[-period + i] if len(train) >= period else train.mean()
+                else:
+                    predictions.iloc[i] = test.iloc[i - period]
+        elif model_config.get('type') == 'hw':
+            hw = ExponentialSmoothing(train, trend='add', seasonal=None).fit()
+            predictions = hw.forecast(steps=len(test))
+        elif model_config.get('type') == 'prophet' and PROPHET_AVAILABLE:
+            df_prophet = pd.DataFrame({'ds': pd.date_range(start='2020-01-01', periods=len(train), freq='M'), 'y': train.values})
+            m = Prophet()
+            m.fit(df_prophet)
+            future = m.make_future_dataframe(periods=len(test), freq='M')
+            forecast = m.predict(future)
+            predictions = pd.Series(forecast['yhat'].iloc[-len(test):].values, index=test.index)
+        elif 'order' in model_config:
+            order = model_config['order']
+            seasonal = model_config.get('seasonal')
+            if seasonal:
+                model = SARIMAX(train, order=order, seasonal_order=seasonal)
+            else:
+                model = ARIMA(train, order=order)
+            fitted = model.fit()
+            predictions = fitted.forecast(steps=len(test))
+        else:
+            return None, None, {"error": "Unknown model configuration."}
+
+        rmse = np.sqrt(mean_squared_error(test, predictions))
+        mae = mean_absolute_error(test, predictions)
+        mape = np.mean(np.abs((test - predictions) / test)) * 100 if not (test == 0).any() else np.nan
+        smape = np.mean(2 * np.abs(test - predictions) / (np.abs(test) + np.abs(predictions))) * 100
+        naive_errors = np.abs(train.diff().dropna())
+        mase_denom = naive_errors.mean() if len(naive_errors) > 0 else 1
+        mase = mae / mase_denom if mase_denom > 0 else np.nan
+
+        metrics = {'RMSE': float(rmse), 'MAE': float(mae), 'MAPE': float(mape) if not np.isnan(mape) else None,
+                   'sMAPE': float(smape), 'MASE': float(mase) if not np.isnan(mase) else None}
+        return predictions, test, metrics
+    except Exception as e:
+        return None, None, {"error": str(e)}
+
+# ===================== PREDICTIVE MODELING FUNCTIONS =====================
 def evaluate_model_practical_significance(y_true, y_pred, task_type):
     results = {}
     if task_type == 'regression':
@@ -248,16 +405,7 @@ def select_models(task_type, assumptions):
         reasoning.append("KNN: Instance-based classifier. Good for small datasets.")
     return models, reasoning
 
-def get_download_link(object_to_download, download_filename, link_text):
-    if isinstance(object_to_download, pd.DataFrame):
-        object_to_download = object_to_download.to_csv(index=False)
-        b64 = base64.b64encode(object_to_download.encode()).decode()
-    else:
-        b64 = base64.b64encode(object_to_download).decode()
-    return f'<a href="data:file/zip;base64,{b64}" download="{download_filename}">{link_text}</a>'
-
 def convert_to_serializable(obj):
-    """Convert numpy types and other non-serializable objects to Python native types."""
     if isinstance(obj, dict):
         return {k: convert_to_serializable(v) for k, v in obj.items()}
     elif isinstance(obj, list):
@@ -277,6 +425,14 @@ def convert_to_serializable(obj):
     else:
         return obj
 
+def get_download_link(object_to_download, download_filename, link_text):
+    if isinstance(object_to_download, pd.DataFrame):
+        object_to_download = object_to_download.to_csv(index=False)
+        b64 = base64.b64encode(object_to_download.encode()).decode()
+    else:
+        b64 = base64.b64encode(object_to_download).decode()
+    return f'<a href="data:file/zip;base64,{b64}" download="{download_filename}">{link_text}</a>'
+
 def create_zip_package(model, scaler, encoders, feature_names, target_name, metrics, assumptions):
     zip_buffer = BytesIO()
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
@@ -291,7 +447,7 @@ def create_zip_package(model, scaler, encoders, feature_names, target_name, metr
             'metrics': convert_to_serializable(metrics),
             'assumptions': convert_to_serializable(assumptions),
             'creation_date': str(pd.Timestamp.now()),
-            'version': '2.0.0'
+            'version': '2.1.0'
         }
         zip_file.writestr('metadata.json', json.dumps(metadata, indent=4))
     return zip_buffer.getvalue()
@@ -301,20 +457,22 @@ def main():
     st.markdown('<div class="main-header">🧠 Statistical Reasoning & Analytics Platform</div>', unsafe_allow_html=True)
     st.markdown("*A system that thinks before it calculates. Statistical significance ≠ Practical significance.*")
 
-    # Check critical dependencies
     if not SKLEARN_AVAILABLE:
         st.error(f"❌ Critical: scikit-learn is not available. Error: {st_error_sklearn}")
         st.info("Please check your requirements.txt and ensure scikit-learn is installed correctly.")
         return
     if not STATSMODELS_AVAILABLE:
-        st.warning(f"⚠️ statsmodels not available. Some assumption tests will be disabled. Error: {st_error_statsmodels}")
+        st.warning(f"⚠️ statsmodels not available. Some tests will be disabled. Error: {st_error_statsmodels}")
     if not PLOTLY_AVAILABLE:
         st.error("❌ Critical: plotly is not available. Visualizations will not work.")
         return
 
     with st.sidebar:
         st.header("⚙️ Configuration")
-        analysis_objective = st.selectbox("Analysis Objective", ["Prediction", "Explanation", "Hypothesis Testing", "Segmentation", "Dimensional Reduction"])
+        analysis_objective = st.selectbox(
+            "Analysis Objective", 
+            ["Prediction", "Explanation", "Hypothesis Testing", "Segmentation", "Dimensional Reduction", "Time Series Forecasting"]
+        )
         st.markdown("---")
         st.markdown("### 🧭 Pipeline Stages")
         st.markdown("1. Upload & Understand Data")
@@ -336,7 +494,7 @@ def main():
             elif uploaded_file.name.endswith('.xlsx'):
                 df = pd.read_excel(uploaded_file)
             else:
-                df = pd.read_csv(uploaded_file, sep='	')
+                df = pd.read_csv(uploaded_file, sep='\t')
             st.session_state['df'] = df
             st.session_state['filename'] = uploaded_file.name
             st.success(f"✅ Loaded {df.shape[0]} rows and {df.shape[1]} columns.")
@@ -344,21 +502,249 @@ def main():
             st.error(f"Error loading file: {e}")
             return
     else:
-        st.info("No file uploaded. Using built-in **Diabetes Dataset** for demonstration.")
-        from sklearn.datasets import load_diabetes
-        data = load_diabetes()
-        df = pd.DataFrame(data.data, columns=data.feature_names)
-        df['target'] = data.target
-        st.session_state['df'] = df
-        st.session_state['filename'] = 'diabetes_demo.csv'
-        st.write(df.head())
+        if analysis_objective == "Time Series Forecasting":
+            st.info("No file uploaded. Using built-in **Airline Passengers Dataset** for time series demonstration.")
+            try:
+                from statsmodels.datasets import get_rdataset
+                data = get_rdataset("AirPassengers", "datasets")
+                df = data.data
+                df.columns = ['Month', 'Passengers']
+                df['Month'] = pd.to_datetime(df['Month'])
+            except:
+                # Fallback if statsmodels dataset fails
+                dates = pd.date_range('1949-01', '1960-12', freq='M')
+                passengers = [112, 118, 132, 129, 121, 135, 148, 148, 136, 119, 104, 118,
+                             115, 126, 141, 135, 125, 149, 170, 170, 158, 133, 114, 140,
+                             145, 150, 178, 163, 172, 178, 199, 199, 184, 162, 146, 166,
+                             171, 180, 193, 181, 183, 218, 230, 242, 209, 191, 172, 194,
+                             196, 196, 236, 235, 229, 243, 264, 272, 237, 211, 180, 201,
+                             204, 188, 235, 227, 234, 264, 302, 293, 259, 229, 203, 229,
+                             242, 233, 267, 269, 270, 315, 364, 347, 312, 274, 237, 278,
+                             284, 277, 317, 313, 318, 374, 413, 405, 355, 306, 271, 306,
+                             315, 301, 356, 348, 355, 422, 465, 467, 404, 347, 305, 336,
+                             340, 318, 362, 348, 363, 435, 491, 505, 404, 359, 310, 337,
+                             360, 342, 406, 396, 420, 472, 548, 559, 463, 407, 362, 405,
+                             417, 391, 419, 461, 472, 535, 622, 606, 508, 461, 390, 432]
+                df = pd.DataFrame({'Month': dates, 'Passengers': passengers})
+            st.session_state['df'] = df
+            st.session_state['filename'] = 'airline_passengers.csv'
+            st.write(df.head())
+        else:
+            st.info("No file uploaded. Using built-in **Diabetes Dataset** for demonstration.")
+            from sklearn.datasets import load_diabetes
+            data = load_diabetes()
+            df = pd.DataFrame(data.data, columns=data.feature_names)
+            df['target'] = data.target
+            st.session_state['df'] = df
+            st.session_state['filename'] = 'diabetes_demo.csv'
+            st.write(df.head())
 
     df = st.session_state['df']
     all_columns = df.columns.tolist()
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     categorical_cols = df.select_dtypes(include=['object']).columns.tolist()
 
-    # TARGET SELECTION - immediately after data load
+    # ===================== TIME SERIES FORECASTING BRANCH =====================
+    if analysis_objective == "Time Series Forecasting":
+        st.markdown('<div class="sub-header">Stage 2: Time Series Configuration</div>', unsafe_allow_html=True)
+
+        ts_numeric_cols = [c for c in numeric_cols if df[c].nunique() > 10]
+        if not ts_numeric_cols:
+            st.error("No suitable numeric column found for time series forecasting. Need a column with more than 10 unique values.")
+            return
+
+        ts_col = st.selectbox("Select Time Series Variable (to forecast)", ts_numeric_cols)
+
+        date_cols = [c for c in all_columns if 'date' in c.lower() or 'time' in c.lower() or 'month' in c.lower() or 'year' in c.lower()]
+        date_col = None
+        if date_cols:
+            date_col = st.selectbox("Select Date/Time Column (optional)", ['None'] + date_cols)
+            if date_col == 'None':
+                date_col = None
+
+        period = st.selectbox("Select Seasonal Period", ["Monthly (12)", "Quarterly (4)", "Weekly (52)", "Daily (7)", "Auto-detect"])
+        period_map = {"Monthly (12)": 12, "Quarterly (4)": 4, "Weekly (52)": 52, "Daily (7)": 7, "Auto-detect": None}
+        period_value = period_map[period]
+
+        forecast_horizon = st.slider("Forecast Horizon (periods ahead)", 1, 24, 12)
+
+        st.markdown('<div class="sub-header">Stage 3: Time Series Diagnostics</div>', unsafe_allow_html=True)
+
+        series = df[ts_col].dropna()
+        if len(series) < 20:
+            st.error(f"Time series too short ({len(series)} observations). Need at least 20 for reliable analysis.")
+            return
+
+        fig = px.line(y=series.values, x=range(len(series)), title=f"Raw Time Series: {ts_col}", 
+                     labels={'x': 'Time Index', 'y': ts_col})
+        st.plotly_chart(fig, use_container_width=True)
+
+        if st.button("🔬 Run Time Series Diagnostics", type="primary"):
+            with st.spinner("Analyzing time series properties..."):
+                diagnostics = {}
+
+                st.markdown("#### 1. Stationarity Tests")
+                col1, col2 = st.columns(2)
+
+                adf_result = check_stationarity_adf(series)
+                diagnostics['adf'] = adf_result
+                with col1:
+                    st.metric("ADF Test p-value", f"{adf_result['p_value']:.4f}")
+                    st.write(adf_result['interpretation'])
+
+                kpss_result = check_stationarity_kpss(series)
+                diagnostics['kpss'] = kpss_result
+                with col2:
+                    st.metric("KPSS Test p-value", f"{kpss_result['p_value']:.4f}")
+                    st.write(kpss_result['interpretation'])
+
+                adf_stationary = adf_result['is_stationary']
+                kpss_stationary = kpss_result['is_stationary']
+                if adf_stationary and kpss_stationary:
+                    st.success("✅ Both tests agree: Series is STATIONARY.")
+                elif not adf_stationary and not kpss_stationary:
+                    st.warning("⚠️ Both tests agree: Series is NON-STATIONARY. Differencing required.")
+                else:
+                    st.info("ℹ️ Tests disagree. ADF suggests differencing may be needed. Use visual inspection.")
+
+                st.markdown("#### 2. Trend Analysis")
+                trend_result = detect_trend(series)
+                diagnostics['trend'] = trend_result
+                st.write(trend_result['interpretation'])
+
+                st.markdown("#### 3. Seasonality Analysis")
+                if period_value is None:
+                    period_value = 12 if len(series) >= 24 else 4
+                seasonality_result = detect_seasonality(series, period=period_value)
+                diagnostics['seasonality'] = seasonality_result
+                st.write(seasonality_result['interpretation'])
+
+                st.markdown("#### 4. Time Series Decomposition")
+                decomposition = time_series_decompose(series, period=period_value)
+                if decomposition is not None:
+                    fig = make_subplots(rows=4, cols=1, shared_xaxes=True,
+                                       subplot_titles=("Observed", "Trend", "Seasonal", "Residual"))
+                    fig.add_trace(go.Scatter(y=decomposition.observed, mode='lines', name='Observed'), row=1, col=1)
+                    fig.add_trace(go.Scatter(y=decomposition.trend, mode='lines', name='Trend'), row=2, col=1)
+                    fig.add_trace(go.Scatter(y=decomposition.seasonal, mode='lines', name='Seasonal'), row=3, col=1)
+                    fig.add_trace(go.Scatter(y=decomposition.resid, mode='lines', name='Residual'), row=4, col=1)
+                    fig.update_layout(height=800, title_text="Additive Decomposition")
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    var_ratio = 1 - np.var(decomposition.resid.dropna()) / np.var(decomposition.observed - decomposition.trend)
+                    st.info(f"Seasonal strength: {var_ratio:.3f} (0=none, 1=perfect seasonality)")
+                else:
+                    st.warning("Could not decompose series. Insufficient data or invalid period.")
+
+                st.markdown("#### 5. Autocorrelation Analysis")
+                try:
+                    max_lags = min(40, len(series)//2 - 1)
+                    acf_vals = acf(series.dropna(), nlags=max_lags, fft=True)
+                    pacf_vals = pacf(series.dropna(), nlags=max_lags)
+
+                    fig = make_subplots(rows=2, cols=1, subplot_titles=("ACF", "PACF"))
+                    fig.add_trace(go.Bar(y=acf_vals, name='ACF'), row=1, col=1)
+                    fig.add_trace(go.Bar(y=pacf_vals, name='PACF'), row=2, col=1)
+                    fig.update_layout(height=600)
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    st.markdown('<div class="info-box"><b>ACF/PACF Interpretation:</b><br>- ACF tails off, PACF cuts off → AR model<br>- ACF cuts off, PACF tails off → MA model<br>- Both tail off → ARMA model<br>- Significant lags at seasonal periods → Seasonal component needed</div>', unsafe_allow_html=True)
+                except Exception as e:
+                    st.warning(f"Could not compute ACF/PACF: {e}")
+
+                st.session_state['ts_diagnostics'] = diagnostics
+                st.session_state['ts_series'] = series
+                st.session_state['ts_period'] = period_value
+                st.session_state['ts_col'] = ts_col
+                st.session_state['forecast_horizon'] = forecast_horizon
+
+        if 'ts_diagnostics' in st.session_state:
+            st.markdown('<div class="sub-header">Stage 4: Time Series Model Selection & Training</div>', unsafe_allow_html=True)
+
+            diagnostics = st.session_state['ts_diagnostics']
+            series = st.session_state['ts_series']
+            period_value = st.session_state['ts_period']
+            forecast_horizon = st.session_state['forecast_horizon']
+
+            models, recommendations = select_ts_model(
+                series, diagnostics['adf'], diagnostics['kpss'], 
+                diagnostics['seasonality'], diagnostics['trend']
+            )
+
+            st.markdown("### Model Recommendations")
+            for rec in recommendations:
+                st.markdown(f"- {rec}")
+
+            if st.button("🚀 Train Time Series Models", type="primary"):
+                with st.spinner("Training and evaluating time series models..."):
+                    ts_results = []
+                    all_predictions = {}
+
+                    for model_name, model_config in models.items():
+                        st.text(f"Training {model_name}...")
+                        predictions, test, metrics = fit_ts_model(series, model_name, model_config)
+
+                        if metrics and 'error' not in metrics:
+                            ts_results.append({
+                                'Model': model_name,
+                                'RMSE': metrics.get('RMSE'),
+                                'MAE': metrics.get('MAE'),
+                                'MAPE': metrics.get('MAPE'),
+                                'sMAPE': metrics.get('sMAPE'),
+                                'MASE': metrics.get('MASE')
+                            })
+                            all_predictions[model_name] = (predictions, test)
+                        else:
+                            st.warning(f"{model_name} failed: {metrics.get('error', 'Unknown error')}")
+
+                    if ts_results:
+                        ts_results_df = pd.DataFrame(ts_results)
+                        st.session_state['ts_results_df'] = ts_results_df
+                        st.session_state['ts_predictions'] = all_predictions
+
+                        st.markdown("### Model Performance Comparison")
+                        st.dataframe(ts_results_df, use_container_width=True)
+
+                        best_ts_idx = ts_results_df['RMSE'].idxmin()
+                        best_ts_model = ts_results_df.loc[best_ts_idx, 'Model']
+                        st.success(f"🏆 Best Time Series Model: **{best_ts_model}** (by RMSE)")
+
+                        st.markdown("### Forecast Visualization")
+                        fig = go.Figure()
+                        first_pred = list(all_predictions.values())[0]
+                        if first_pred[1] is not None:
+                            fig.add_trace(go.Scatter(y=first_pred[1].values, mode='lines', name='Actual', line=dict(color='black', width=2)))
+
+                        for model_name, (pred, test) in all_predictions.items():
+                            if pred is not None and test is not None:
+                                fig.add_trace(go.Scatter(y=pred.values if hasattr(pred, 'values') else pred, 
+                                                        mode='lines', name=model_name, opacity=0.7))
+
+                        fig.update_layout(title="Out-of-Sample Forecasts vs Actual", xaxis_title="Time", yaxis_title=ts_col)
+                        st.plotly_chart(fig, use_container_width=True)
+
+                        st.markdown("### Practical Significance")
+                        best_metrics = ts_results_df.loc[best_ts_idx]
+                        mape = best_metrics.get('MAPE')
+                        if mape and mape < 10:
+                            st.markdown(f'<div class="success-box">MAPE = {mape:.1f}%: Excellent forecast accuracy. Reliable for operational planning.</div>', unsafe_allow_html=True)
+                        elif mape and mape < 20:
+                            st.markdown(f'<div class="warning-box">MAPE = {mape:.1f}%: Moderate accuracy. Useful for directional planning but verify with domain knowledge.</div>', unsafe_allow_html=True)
+                        else:
+                            st.markdown(f'<div class="danger-box">MAPE = {mape:.1f}% if available: Poor accuracy. Model may not be suitable for production use.</div>', unsafe_allow_html=True)
+
+                        mase = best_metrics.get('MASE')
+                        if mase:
+                            if mase < 1:
+                                st.markdown(f'<div class="success-box">MASE = {mase:.3f}: Model outperforms naive benchmark.</div>', unsafe_allow_html=True)
+                            else:
+                                st.markdown(f'<div class="warning-box">MASE = {mase:.3f}: Model performs worse than naive benchmark. Consider simpler approaches.</div>', unsafe_allow_html=True)
+                    else:
+                        st.error("All time series models failed to train. Check data quality and parameters.")
+
+        return
+
+    # ===================== STANDARD PREDICTIVE ANALYTICS BRANCH =====================
     target_col = st.selectbox("Select Target Variable (if applicable)", ['None'] + all_columns)
     if target_col != 'None':
         st.session_state['target_col'] = target_col
@@ -416,7 +802,6 @@ def main():
     else:
         st.success("No missing values detected. Data is complete.")
 
-    # Outlier Analysis - safe because target_col is already defined
     if numeric_cols:
         outlier_options = [c for c in numeric_cols if c != target_col] if target_col else numeric_cols
         if outlier_options:
@@ -507,7 +892,7 @@ def main():
     st.markdown('<div class="sub-header">Stage 5: Assumption Engine</div>', unsafe_allow_html=True)
 
     if not STATSMODELS_AVAILABLE:
-        st.warning("statsmodels is not available. Assumption tests are disabled. Install statsmodels for full functionality.")
+        st.warning("statsmodels is not available. Assumption tests are disabled.")
 
     if STATSMODELS_AVAILABLE and st.button("🔬 Run Full Assumption Diagnostics", type="primary"):
         with st.spinner("Running comprehensive statistical tests..."):
@@ -590,11 +975,9 @@ def main():
             for reason in model_reasoning:
                 st.markdown(f"- {reason}")
 
-        # Prepare data
         X = df.drop(columns=[target_col]).copy()
         y = df[target_col].copy()
 
-        # Encode categoricals
         encoders = {}
         for col in categorical_cols:
             if col in X.columns:
@@ -602,13 +985,11 @@ def main():
                 X[col] = le.fit_transform(X[col].astype(str))
                 encoders[col] = le
 
-        # Impute
         X_numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
         if X_numeric_cols:
             imputer = SimpleImputer(strategy='median')
             X[X_numeric_cols] = imputer.fit_transform(X[X_numeric_cols])
 
-        # Scale - check skewness only on predictor numeric columns
         predictor_numeric = [c for c in X_numeric_cols if c in X.columns]
         has_outliers = False
         for c in predictor_numeric:
@@ -692,16 +1073,16 @@ def main():
                         st.error("Could not determine best model - missing evaluation metrics.")
                         return
 
-                best_model_name = results_df.loc[best_idx, 'Model']
-                st.session_state['best_model'] = trained_models[best_model_name]
-                st.session_state['best_model_name'] = best_model_name
+                    best_model_name = results_df.loc[best_idx, 'Model']
+                    st.session_state['best_model'] = trained_models[best_model_name]
+                    st.session_state['best_model_name'] = best_model_name
 
-                st.success(f"🏆 Best Model: **{best_model_name}**")
+                    st.success(f"🏆 Best Model: **{best_model_name}**")
 
-                best_practical = evaluate_model_practical_significance(
-                    y_test, trained_models[best_model_name].predict(X_test), task_type
-                )
-                st.markdown(f'<div class="insight-box"><b>Practical Significance:</b><br>{best_practical["practical_message"]}<br><br>{best_practical.get("variance_message", "")}</div>', unsafe_allow_html=True)
+                    best_practical = evaluate_model_practical_significance(
+                        y_test, trained_models[best_model_name].predict(X_test), task_type
+                    )
+                    st.markdown(f'<div class="insight-box"><b>Practical Significance:</b><br>{best_practical["practical_message"]}<br><br>{best_practical.get("variance_message", "")}</div>', unsafe_allow_html=True)
 
     # --- STAGE 7: INTERPRETATION ---
     if 'best_model' in st.session_state:
@@ -749,7 +1130,6 @@ def main():
 
             st.markdown('<div class="info-box"><b>Interpretation:</b> Coefficients represent the change in log-odds (classification) or target value (regression) for a one-unit change in the feature, holding others constant.</div>', unsafe_allow_html=True)
 
-        # SHAP Analysis
         if SHAP_AVAILABLE and best_name in ['Random Forest', 'Gradient Boosting', 'XGBoost'] and MATPLOTLIB_AVAILABLE:
             st.markdown("### SHAP Explainability")
             with st.spinner("Computing SHAP values..."):
@@ -766,7 +1146,6 @@ def main():
                 except Exception as e:
                     st.warning(f"SHAP computation failed: {e}")
 
-        # Practical Significance
         st.markdown("### Practical Significance Deep Dive")
         y_pred = best_model.predict(X_test)
         practical = evaluate_model_practical_significance(y_test, y_pred, task_type)
@@ -787,7 +1166,6 @@ def main():
 
         st.markdown(f'<div class="warning-box"><b>Business Context:</b><br>{practical["practical_message"]}<br><br>{practical.get("variance_message", "")}</div>', unsafe_allow_html=True)
 
-        # Model Comparison
         st.markdown("### Model Comparison Dashboard")
         results_df = st.session_state['results_df']
         if task_type == 'regression':
@@ -806,7 +1184,6 @@ def main():
             fig.update_layout(height=400, showlegend=False, title_text="Cross-Model Performance Comparison")
             st.plotly_chart(fig, use_container_width=True)
 
-        # Deployment Package
         st.markdown('<div class="sub-header">Stage 8: Model Registry & Deployment</div>', unsafe_allow_html=True)
 
         metrics = results_df.to_dict('records')
@@ -816,11 +1193,11 @@ def main():
             feature_names, target_col, metrics, assumptions
         )
 
-        st.markdown(get_download_link(zip_data, "analytical_pipeline_v2.0.zip", "📦 Download Complete Pipeline Package (ZIP)"), unsafe_allow_html=True)
+        st.markdown(get_download_link(zip_data, "analytical_pipeline_v2.1.zip", "📦 Download Complete Pipeline Package (ZIP)"), unsafe_allow_html=True)
         st.markdown('<div class="success-box">This package includes the trained model, preprocessing artifacts, feature definitions, assumption test results, and metadata.</div>', unsafe_allow_html=True)
 
     st.markdown("---")
-    st.markdown("<center>Powered by Statistical Reasoning Engine v2.0 | Built for Analysts, Not Just Machines</center>", unsafe_allow_html=True)
+    st.markdown("<center>Powered by Statistical Reasoning Engine v2.1 | Built for Analysts, Not Just Machines</center>", unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
