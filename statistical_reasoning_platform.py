@@ -419,8 +419,13 @@ def main():
         st.success("No missing values detected. Data is complete.")
 
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    if numeric_cols:
-        selected_outlier_col = st.selectbox("Select variable for Outlier Analysis", numeric_cols)
+    # Ensure target is not in the outlier analysis options if it's meant to be predicted
+    if target_col != 'None' and target_col in numeric_cols:
+        outlier_options = [c for c in numeric_cols if c != target_col]
+    else:
+        outlier_options = numeric_cols
+    if outlier_options:
+        selected_outlier_col = st.selectbox("Select variable for Outlier Analysis", outlier_options)
         Q1 = df[selected_outlier_col].quantile(0.25)
         Q3 = df[selected_outlier_col].quantile(0.75)
         IQR = Q3 - Q1
