@@ -12,7 +12,7 @@ A comprehensive statistical analysis platform that behaves like a competent stat
 
 ## Deployed App
 
-[Click here to view the live app](https://your-app-url.streamlit.app)
+[Click here to view the live app]([https://your-app-url.streamlit.app](https://statisticalreasoning-platform-eu.streamlit.app/))
 
 ## Local Setup
 
